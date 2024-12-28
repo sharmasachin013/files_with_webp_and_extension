@@ -9,6 +9,8 @@ use Drupal\Core\Controller\ControllerBase;
 use Drupal\file\Entity\File;
 use Drupal\entity\EntityStorageInterface;
 use Drupal\Core\File\FileSystemInterface;
+use Drupal\node\Entity\Node;
+use Drupal\Component\Utility\Html;
 
 
 /**
@@ -34,43 +36,7 @@ final class ConvertMediaWebpController extends ControllerBase {
   /**
  * Convert all image files to WebP format.
  */
-function convert_all_files_to_webp() {
-  // Load all file entities.
-  $storage = \Drupal::entityTypeManager()->getStorage('file');
-  $query = $storage->getQuery();
-  $file_ids = $query->accessCheck(TRUE)->execute();
 
-
-  foreach ($file_ids as $file_id) {
-    $file = File::load($file_id);
-
-    if ($file) {
-      $uri = $file->getFileUri();
-      $real_path = \Drupal::service('file_system')->realpath($uri);
-
-      // Check if the file is an image (e.g., JPEG, PNG).
-      $mime_type = mime_content_type($real_path);
-      if (in_array($mime_type, ['image/jpeg', 'image/png'])) {
-        // Define the WebP file path.
-        $webp_path = preg_replace('/\.(jpg|jpeg|png)$/i', '.webp', $real_path);
-
-        // Convert to WebP.
-        if ($this->convert_to_webp($real_path, $webp_path)) {
-          // Save the WebP file as a new file entity.
-          $webp_uri = preg_replace('/\.(jpg|jpeg|png)$/i', '.webp', $uri);
-          $webp_file = File::create([
-            'uri' => $webp_uri,
-            'status' => 1,
-          ]);
-          $webp_file->save();
-
-          // Log the conversion.
-          \Drupal::logger('custom_module')->notice('Converted file ID @id to WebP.', ['@id' => $file_id]);
-        }
-      }
-    }
-  }
-}
 
 
 
@@ -78,40 +44,6 @@ function convert_all_files_to_webp() {
 /**
  * Convert all files in Drupal to WebP format and update references.
  */
-function replace_all_files_with_webp() {
-  // Load all file entities.
-  $file_storage = \Drupal::entityTypeManager()->getStorage('file');
-  $query = $file_storage->getQuery();
-  $file_ids = $query->accessCheck(TRUE)->execute();
-
-  foreach ($file_ids as $file_id) {
-    $file = File::load($file_id);
-    if ($file) {
-      $original_uri = $file->getFileUri();
-      $real_path = \Drupal::service('file_system')->realpath($original_uri);
-
-      // Check if the file is a supported image (e.g., JPEG, PNG).
-      $mime_type = mime_content_type($real_path);
-      if (in_array($mime_type, ['image/jpeg', 'image/png'])) {
-        // Define the WebP file path.
-        $webp_path = preg_replace('/\.(jpg|jpeg|png)$/i', '.webp', $real_path);
-
-        // Convert to WebP.
-        if ($this->convert_to_webp($real_path, $webp_path)) {
-          // Replace the original file with the WebP file.
-          \Drupal::service('file_system')->move($webp_path, $original_uri, FileSystemInterface::EXISTS_REPLACE);
-
-          // Update the file entity's MIME type.
-          $file->setMimeType('image/webp');
-          $file->save();
-
-          // Log the replacement.
-          \Drupal::logger('custom_module')->notice('Replaced file ID @id with WebP.', ['@id' => $file_id]);
-        }
-      }
-    }
-  }
-}
 
 /**
  * Convert all image files to WebP format and update their extensions.
@@ -124,13 +56,22 @@ function replace_all_files_with_webp_and_extension() {
 
   foreach ($file_ids as $file_id) {
     $file = File::load($file_id);
+  //  dump($file);
+   
     if ($file) {
       $original_uri = $file->getFileUri();
+
+     // dump($original_uri);
       $real_path = \Drupal::service('file_system')->realpath($original_uri);
 
       // Check if the file is a supported image (e.g., JPEG, PNG).
-      $mime_type = mime_content_type($real_path);
+      //dump($real_path);
+      if($file)
+      $mime_type = $file->getMimeType();
+     //dump($mime_type);
       if (in_array($mime_type, ['image/jpeg', 'image/png'])) {
+       //  dump($mime_type);
+
         // Define the new WebP file path with the .webp extension.
         $webp_uri = preg_replace('/\.(jpg|jpeg|png)$/i', '.webp', $original_uri);
         $webp_path = \Drupal::service('file_system')->realpath($webp_uri);
@@ -144,6 +85,7 @@ function replace_all_files_with_webp_and_extension() {
           $file->setFileUri($webp_uri);
           $file->setMimeType('image/webp');
           $file->save();
+          $this->update_inline_references_in_nodes($original_uri, $webp_uri);
 
           // Log the replacement.
           \Drupal::logger('custom_module')->notice('Replaced file ID @id with WebP and updated extension.', ['@id' => $file_id]);
@@ -167,15 +109,104 @@ function replace_all_files_with_webp_and_extension() {
  * @return bool
  *   TRUE if conversion is successful, FALSE otherwise.
  */
+// function convert_to_webp($source_path, $webp_path) {
+
+//   $image = imagecreatefromstring(file_get_contents($source_path));
+//   dump($image);
+//   if ($image) {
+//     $success = imagewebp($image, $webp_path, 80); // Adjust quality as needed.
+//     imagedestroy($image);
+//     return $success;
+//   }
+//   return FALSE;
+// }
+
 function convert_to_webp($source_path, $webp_path) {
   $image = imagecreatefromstring(file_get_contents($source_path));
   if ($image) {
+    // Convert palette-based images to true color.
+    if (!imageistruecolor($image)) {
+      imagepalettetotruecolor($image);
+    }
+    // Save as WebP.
     $success = imagewebp($image, $webp_path, 80); // Adjust quality as needed.
     imagedestroy($image);
     return $success;
   }
   return FALSE;
 }
+
+/**
+ * Update inline file references in nodes.
+ *
+ * @param string $old_uri
+ *   The old file URI.
+ * @param string $new_uri
+ *   The new WebP file URI.
+ */
+function update_inline_references_in_nodes($old_uri, $new_uri) {
+  $old_path = \Drupal::service('file_system')->realpath($old_uri);
+  $new_path = \Drupal::service('file_system')->realpath($new_uri);
+
+
+  // Load all nodes that might reference the file.
+  $node_storage = \Drupal::entityTypeManager()->getStorage('node');
+ //$query->accessCheck(TRUE)->execute();
+  $node_ids = $node_storage->getQuery()->accessCheck(TRUE)->execute();
+  
+
+  foreach ($node_ids as $node_id) {
+    $node = Node::load($node_id);
+    $updated = FALSE;
+    //dump($node->get('body')->value);
+
+    // Iterate through all fields in the node.
+    foreach ($node->getFields() as $field_name => $field) {
+      //dump($field->getFieldDefinition()->getType());
+      if ($field->getFieldDefinition()->getType() === 'text_with_summary' || $field->getFieldDefinition()->getType() === 'text_long') {
+        $field_value =$node->get('body')->value;
+      //  /dump($node->get('body')->value);
+     
+        $string = $old_path;
+        $substring = '/app/web/';
+       // dump($field_value);
+       // dump($old_path);
+        $old_path = 'png';
+        $new_path = 'webp';
+
+// Substring to remove
+
+       // $field_value = str_replace($substring, "", $string);
+      //  dump($field_value);
+       dump($node);
+        if (strpos($field_value, $old_path) !== FALSE) {
+           dump($field_value);
+          $field_value = str_replace($old_path, $new_path, $field_value);
+         // dump($field_value);exit;
+         //dump($field_value);
+         //$updated_body = strip_tags($body, '<p>');
+         $field_value  = preg_replace('/<\/?p[^>]*>/', '', $field_value);
+         dump($field_value);
+         
+         //$node->set('body', $field_value);
+         $node->set('body', [
+          'value' => $field_value,
+          'format' => $node->get('body')->format, // Retain the text format.
+        ]);
+          $updated = TRUE;
+        }
+      }
+    }
+   
+
+    // Save the node if updated.
+    if ($updated) {
+     $node->save();
+      \Drupal::logger('custom_module')->notice('Updated node @node_id with new WebP file references.', ['@node_id' => $node_id]);
+    }
+  }
+}
+
 
 
 
